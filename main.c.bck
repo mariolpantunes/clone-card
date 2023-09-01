@@ -1,0 +1,160 @@
+#include <stdlib.h>
+#include <string.h>
+#include <nfc/nfc.h>
+
+/*
+
+Inspired by proxmark3. Can be use with PN532 reader and raspberry pi, so you don't need a proxmark3 device or PCSC Mifare software from piswords.
+
+APDU commands for Magic Gen3 card.
+
+cla  ins p1  p2  len
+ 90  F0  CC  CC  10 <block0>  - write block 0
+ 90  FB  CC  CC  07 <uid>     - change uid (independently of block0 data)
+ 90  FD  11  11  00           - lock permanently
+
+*/
+
+
+void hexDump(char *desc, void *addr, int len) 
+{
+    int i;
+    unsigned char buff[17];
+    unsigned char *pc = (unsigned char*)addr;
+
+    // Output description if given.
+    if (desc != NULL)
+        printf ("%s:\n", desc);
+
+    // Process every byte in the data.
+    for (i = 0; i < len; i++) {
+        // Multiple of 16 means new line (with line offset).
+
+        if ((i % 16) == 0) {
+            // Just don't print ASCII for the zeroth line.
+            if (i != 0)
+                printf("  %s\n", buff);
+
+            // Output the offset.
+            printf("  %04x ", i);
+        }
+
+        // Now the hex code for the specific character.
+        printf(" %02x", pc[i]);
+
+        // And store a printable ASCII character for later.
+        if ((pc[i] < 0x20) || (pc[i] > 0x7e)) {
+            buff[i % 16] = '.';
+        } else {
+            buff[i % 16] = pc[i];
+        }
+
+        buff[(i % 16) + 1] = '\0';
+    }
+
+    // Pad out last line if not exactly 16 characters.
+    while ((i % 16) != 0) {
+        printf("   ");
+        i++;
+    }
+
+    // And print the final ASCII bit.
+    printf("  %s\n", buff);
+}
+
+int CardTransmit(nfc_device *pnd, uint8_t * capdu, size_t capdulen, uint8_t * rapdu, size_t * rapdulen)
+{
+  int res;
+  size_t  szPos;
+    uint32_t cycles = 0;
+
+  printf("=> ");
+  for (szPos = 0; szPos < capdulen; szPos++) {
+    printf("%02x ", capdu[szPos]);
+  }
+  printf("\n");
+  if ((res = nfc_initiator_transceive_bytes_timed(pnd, capdu, capdulen, rapdu, *rapdulen, &cycles)) < 0) { //can also be not timed, depens what works for u. 
+	  printf("error smaller than 0, res: %d, cycles %d\n", res, cycles);
+    return -1;
+  } else {
+    *rapdulen = (size_t) res;
+    printf("<= ");
+    for (szPos = 0; szPos < *rapdulen; szPos++) {
+      printf("%02x ", rapdu[szPos]);
+    }
+    printf("\n");
+    return 0;
+  }
+}
+
+int main(int argc, const char *argv[])
+{
+  nfc_device *pnd;
+  nfc_target nt;
+  nfc_context *context;
+  nfc_init(&context);
+  if (context == NULL) {
+    printf("Unable to init libnfc (malloc)\n");
+    exit(EXIT_FAILURE);
+  }
+  const char *acLibnfcVersion = nfc_version();
+  (void)argc;
+  printf("%s uses libnfc %s\n", argv[0], acLibnfcVersion);
+
+  pnd = nfc_open(context, NULL);
+
+  if (pnd == NULL) {
+    printf("ERROR: %s", "Unable to open NFC device.");
+    exit(EXIT_FAILURE);
+  }
+  if (nfc_initiator_init(pnd) < 0) {
+    nfc_perror(pnd, "nfc_initiator_init");
+    exit(EXIT_FAILURE);
+  }
+
+  printf("NFC reader: %s opened\n", nfc_device_get_name(pnd));
+
+  const nfc_modulation nmMifare = {
+    .nmt = NMT_ISO14443A,
+    .nbr = NBR_106,
+  };
+  // nfc_set_property_bool(pnd, NP_AUTO_ISO14443_4, true);
+  printf("Polling for target...\n");
+  while (nfc_initiator_select_passive_target(pnd, nmMifare, NULL, 0, &nt) <= 0);
+  printf("Target detected!\n");
+  
+    // Use raw send/receive methods
+  if (nfc_device_set_property_bool(pnd, NP_EASY_FRAMING, false) < 0) { //for timed function.
+    nfc_perror(pnd, "nfc_device_set_property_bool");
+    nfc_close(pnd);
+    nfc_exit(context);
+    exit(EXIT_FAILURE);
+  }
+  
+  uint8_t capdu[264]={0};
+  size_t capdulen;
+  uint8_t rapdu[264]={0};
+  size_t rapdulen;
+  //change uid (command) + new uid
+   memcpy(capdu, "\x90\xFB\xCC\xCC\x07\x06\xd3\xd1\x4a\x7b\x17\x90", 12);
+   
+   //hex value after: "\x90\xFB\xCC\xCC\x07 <UID> (in hex, use \x)
+   // first hex part is APDU command. 
+   // to lock the UUID use this: '90  FD  11  11  00' APDU command
+   // Write sector 0 (See top)
+   
+  capdulen=12; //make sure size is correct after changing memcpy (also check for size at end)
+  rapdulen=sizeof(rapdu);
+  if (CardTransmit(pnd, capdu, capdulen, rapdu, &rapdulen) < 0){
+    printf("card trasnmit smaller than 0");
+  }
+  
+  hexDump("rapdu: ", rapdu, rapdulen);
+  printf("closing!\n");
+
+  printf("\n");
+  nfc_close(pnd);
+  nfc_exit(context);
+  exit(EXIT_SUCCESS);
+}
+
